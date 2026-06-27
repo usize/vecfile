@@ -1,6 +1,8 @@
 #include <stdio.h>
+#include <string.h>
 #include "sqlite3.h"
 #include "sqlite-vec.h"
+#include "embed.h"
 
 static int print_row(void *unused, int ncols, char **vals, char **names) {
     (void)unused;
@@ -64,7 +66,6 @@ int main(int argc, char *argv[]) {
         "  (3, X'00000000000000000000803f00000000'),"   /* [0,0,1,0] */
         "  (4, X'0000000000000000000000000000803f');"    /* [0,0,0,1] */
     );
-    /* Query: find nearest to [1,0,0,0] — should return rowid 1 first */
     run_sql(db,
         "SELECT rowid, distance FROM test_vec"
         "  WHERE embedding MATCH X'0000803f000000000000000000000000'"
@@ -72,6 +73,28 @@ int main(int argc, char *argv[]) {
         "  ORDER BY distance;"
     );
 
+    /* Phase 3 check: embedding model */
+    printf("--- Embedding test ---\n");
+    const char *model_path = "models/bge-small-en-v1.5-q8_0.gguf";
+    vecfile_embedder *emb = vecfile_embedder_create(model_path);
+    if (!emb) {
+        fprintf(stderr, "Failed to load model from %s\n", model_path);
+        sqlite3_close(db);
+        return 1;
+    }
+    printf("Model loaded: dim=%d\n", vecfile_embedder_dim(emb));
+
+    const char *test_text = "What is semantic search?";
+    float vec[384];
+    int dim = vecfile_embed(emb, test_text, (int)strlen(test_text), vec, 384);
+    if (dim > 0) {
+        printf("Embedded \"%s\" -> [%.4f, %.4f, %.4f, ...] (dim=%d)\n",
+               test_text, vec[0], vec[1], vec[2], dim);
+    } else {
+        fprintf(stderr, "Embedding failed: %d\n", dim);
+    }
+
+    vecfile_embedder_free(emb);
     sqlite3_close(db);
     return 0;
 }
