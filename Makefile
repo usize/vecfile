@@ -54,7 +54,12 @@ GGML_HOT_CXXFLAGS = -O3 $(INCLUDES) -std=gnu++17 -frtti -fexceptions \
                      -Wno-unused-parameter -Wno-unused-function \
                      -Wno-deprecated-declarations $(GGML_FLAGS)
 
+ZIPOBJ    = $(TOOLCHAIN)/zipobj
+
 LDFLAGS = -lm
+
+# ── Bundled model ────────────────────────────────────────────
+MODEL_GGUF = models/default.gguf
 
 # ── Source files ─────────────────────────────────────────────
 
@@ -102,6 +107,7 @@ ALL_OBJS = $(BUILDDIR)/main.o \
            $(BUILDDIR)/embed.cpp.o \
            $(BUILDDIR)/sqlite3.o \
            $(BUILDDIR)/sqlite-vec.o \
+           $(BUILDDIR)/model.zip.o \
            $(GGML_C_OBJS) $(GGML_CXX_OBJS) \
            $(LLAMA_OBJS) $(MODEL_OBJS)
 
@@ -125,6 +131,12 @@ $(BUILDDIR)/sqlite3.o: vendor/sqlite/sqlite3.c | $(BUILDDIR)
 # sqlite-vec
 $(BUILDDIR)/sqlite-vec.o: vendor/sqlite-vec/sqlite-vec.c | $(BUILDDIR)
 	$(CC) $(VENDOR_CFLAGS) $(VEC_FLAGS) -c -o $@ $<
+
+# Bundled model weights — need both arch objects for fat APE
+$(BUILDDIR)/model.zip.o: $(MODEL_GGUF) | $(BUILDDIR)
+	@mkdir -p $(BUILDDIR)/.aarch64
+	$(ZIPOBJ) -0 -a x86_64 -N "models/default.gguf" -o $@ $<
+	$(ZIPOBJ) -0 -a aarch64 -N "models/default.gguf" -o $(BUILDDIR)/.aarch64/model.zip.o $<
 
 # ggml C files — hot path (O3)
 $(BUILDDIR)/llama.cpp/ggml/src/ggml.c.o: vendor/llama.cpp/ggml/src/ggml.c

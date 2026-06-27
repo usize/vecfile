@@ -23,12 +23,15 @@ vecfile_embedder *vecfile_embedder_create(const char *model_path) {
     llama_log_set(silent_log, nullptr);
     llama_backend_init();
 
-    struct llama_model_params mparams = llama_model_default_params();
-    mparams.use_mmap = true;
+    /* Try bundled model first, then caller-specified path */
+    const char *path = model_path ? model_path : VECFILE_BUNDLED_MODEL;
 
-    struct llama_model *model = llama_model_load_from_file(model_path, mparams);
+    struct llama_model_params mparams = llama_model_default_params();
+    mparams.use_mmap = false;  /* zip-embedded files can't be mmap'd */
+
+    struct llama_model *model = llama_model_load_from_file(path, mparams);
     if (!model) {
-        fprintf(stderr, "vecfile: failed to load model: %s\n", model_path);
+        fprintf(stderr, "vecfile: failed to load model: %s\n", path);
         return nullptr;
     }
 

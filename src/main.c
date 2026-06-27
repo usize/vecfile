@@ -73,12 +73,11 @@ int main(int argc, char *argv[]) {
         "  ORDER BY distance;"
     );
 
-    /* Phase 3 check: embedding model */
+    /* Phase 3 check: embedding model (NULL = use bundled model) */
     printf("--- Embedding test ---\n");
-    const char *model_path = "models/bge-small-en-v1.5-q8_0.gguf";
-    vecfile_embedder *emb = vecfile_embedder_create(model_path);
+    vecfile_embedder *emb = vecfile_embedder_create(NULL);
     if (!emb) {
-        fprintf(stderr, "Failed to load model from %s\n", model_path);
+        fprintf(stderr, "Failed to load bundled model\n");
         sqlite3_close(db);
         return 1;
     }

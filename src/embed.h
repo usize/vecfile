@@ -5,9 +5,13 @@
 extern "C" {
 #endif
 
+/* Path to the bundled model (Cosmopolitan zip filesystem) */
+#define VECFILE_BUNDLED_MODEL "/zip/models/default.gguf"
+
 typedef struct vecfile_embedder vecfile_embedder;
 
-/* Load model from file path. Returns NULL on failure. */
+/* Load model from file path. If path is NULL, uses the bundled model.
+   Returns NULL on failure. */
 vecfile_embedder *vecfile_embedder_create(const char *model_path);
 
 /* Get embedding dimension. */
