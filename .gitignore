@@ -1,0 +1,19 @@
+# Toolchain
+.cosmocc/
+.cosmocc.zip
+
+# Build artifacts
+build/
+vecfile
+vecfile.dbg
+vecfile.aarch64.elf
+vecfile.com.dbg
+
+# Data files
+*.db
+
+# Models
+models/*.gguf
+
+# OS junk
+.DS_Store
