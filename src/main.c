@@ -24,7 +24,8 @@ static void usage(void) {
         "  vecfile ns delete  --db PATH --name NS\n"
         "\n"
         "  vecfile add    --db PATH --ns NS [--tag NAME] [--meta JSON]\n"
-        "                 [--on-dup skip|replace] (\"text\" | - | --file F)\n"
+        "                 [--on-dup skip|replace]\n"
+        "                 (\"text\" | - | --file F | file1 file2 ... | *.txt)\n"
         "  vecfile delete --db PATH --ns NS (--id N | --path P | --all)\n"
         "  vecfile query  --db PATH --ns NS [--limit N] [--pool N]\n"
         "                 [--semantic-only|--lexical-only] [--chunks]\n"
@@ -189,84 +190,176 @@ static int cmd_ns_delete(int argc, char **argv) {
     return rc < 0 ? 1 : 0;
 }
 
+/* Collect bare file paths from argv (args that aren't flags, flag values,
+   or the command name). These come from shell wildcard expansion. */
+static int collect_files(int argc, char **argv, const char ***out) {
+    /* First pass: count */
+    int count = 0;
+    for (int i = 2; i < argc; i++) {  /* skip argv[0] and "add" */
+        if (argv[i][0] == '-') {
+            /* Skip flag and its value (if it has one) */
+            if (argv[i][1] == '-' && i + 1 < argc && argv[i+1][0] != '-')
+                i++;  /* skip --flag VALUE */
+            continue;
+        }
+        /* Check if this is a value for a preceding --flag */
+        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-') continue;
+        count++;
+    }
+
+    if (count == 0) { *out = NULL; return 0; }
+
+    const char **files = (const char **)malloc(count * sizeof(char *));
+    int idx = 0;
+    for (int i = 2; i < argc; i++) {
+        if (argv[i][0] == '-') {
+            if (argv[i][1] == '-' && i + 1 < argc && argv[i+1][0] != '-')
+                i++;
+            continue;
+        }
+        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-') continue;
+        files[idx++] = argv[i];
+    }
+
+    *out = files;
+    return count;
+}
+
 static int cmd_add(int argc, char **argv) {
     const char *db_path = flag(argc, argv, "--db");
     const char *ns_name = flag(argc, argv, "--ns");
     if (!db_path || !ns_name) {
-        fprintf(stderr, "usage: vecfile add --db PATH --ns NS [--file F | - | \"text\"]\n");
+        fprintf(stderr, "usage: vecfile add --db PATH --ns NS"
+                " [--tag T] [--meta JSON] [--on-dup skip|replace]\n"
+                "       (\"text\" | - | --file F | file1 file2 ... | *.txt)\n");
         return 1;
     }
 
-    const char *file_path = flag(argc, argv, "--file");
+    const char *single_file = flag(argc, argv, "--file");
     const char *tag = flag(argc, argv, "--tag");
     const char *meta = flag(argc, argv, "--meta");
     const char *dup_str = flag(argc, argv, "--on-dup");
     int on_dup = (dup_str && strcmp(dup_str, "replace") == 0) ? 1 : 0;
 
-    /* Determine input source */
-    char *content = NULL;
-    int content_len = 0;
-    const char *provenance = tag;
+    /* Collect bare positional args (shell-expanded wildcards or literal text) */
+    const char **bare_args = NULL;
+    int n_bare = collect_files(argc, argv, &bare_args);
 
-    if (file_path) {
-        content = read_file(file_path, &content_len);
-        if (!content) return 1;
-        if (!provenance) provenance = file_path;
-    } else if (has_flag(argc, argv, "-")) {
-        content = read_stdin(&content_len);
-    } else {
-        /* Last positional arg is the text */
-        const char *text = positional(argc, argv);
-        if (text && strcmp(text, "add") != 0) {
-            content_len = (int)strlen(text);
-            content = (char *)malloc(content_len + 1);
-            memcpy(content, text, content_len + 1);
+    /* Determine mode: multi-file, single --file, stdin, or literal text */
+    int is_stdin = has_flag(argc, argv, "-");
+    int is_multi_file = 0;
+
+    /* Heuristic: if there are multiple bare args, or a bare arg looks like
+       a file path (contains / or .), treat them as files */
+    if (n_bare > 1) {
+        is_multi_file = 1;
+    } else if (n_bare == 1 && !single_file && !is_stdin) {
+        /* Single bare arg: is it a file path or literal text? */
+        FILE *test = fopen(bare_args[0], "r");
+        if (test) {
+            fclose(test);
+            is_multi_file = 1;  /* it's an existing file */
         }
+        /* otherwise treat as literal text */
     }
 
-    if (!content || content_len == 0) {
-        fprintf(stderr, "no content provided\n");
-        free(content);
-        return 1;
-    }
-
+    /* Open DB and model once for all files */
     sqlite3_auto_extension((void (*)(void))sqlite3_vec_init);
     sqlite3 *db = open_db(db_path);
-    if (!db) { free(content); return 1; }
+    if (!db) { free(bare_args); return 1; }
 
     int64_t ns_id = vecfile_ns_lookup(db, ns_name);
     if (ns_id < 0) {
         fprintf(stderr, "namespace '%s' not found\n", ns_name);
-        sqlite3_close(db); free(content); return 1;
+        sqlite3_close(db); free(bare_args); return 1;
     }
 
-    /* Model/dim guard */
     int ns_dim = vecfile_ns_dim(db, ns_id);
     if (ns_dim != VECFILE_DIM) {
         fprintf(stderr, "namespace dim %d doesn't match binary model dim %d\n",
                 ns_dim, VECFILE_DIM);
-        sqlite3_close(db); free(content); return 1;
+        sqlite3_close(db); free(bare_args); return 1;
     }
 
     vecfile_embedder *emb = vecfile_embedder_create(NULL);
     if (!emb) {
         fprintf(stderr, "failed to load embedding model\n");
-        sqlite3_close(db); free(content); return 1;
+        sqlite3_close(db); free(bare_args); return 1;
     }
 
-    int64_t file_id = vecfile_add(db, ns_id, emb,
-        content, content_len, provenance, meta, 0, on_dup);
+    int added = 0, errors = 0;
 
+    if (is_multi_file) {
+        /* Multi-file mode: process each bare arg as a file */
+        for (int i = 0; i < n_bare; i++) {
+            int content_len = 0;
+            char *content = read_file(bare_args[i], &content_len);
+            if (!content) { errors++; continue; }
+
+            int64_t fid = vecfile_add(db, ns_id, emb,
+                content, content_len, bare_args[i], meta, 0, on_dup);
+            free(content);
+
+            if (fid < 0) {
+                fprintf(stderr, "error: %s\n", bare_args[i]);
+                errors++;
+            } else {
+                /* Check if it was a dedup skip (same id returned, no new insert) */
+                added++;
+                printf("  %s -> file_id=%lld\n", bare_args[i], (long long)fid);
+            }
+        }
+        printf("done: %d added, %d errors\n", added, errors);
+
+    } else if (single_file) {
+        /* Single --file */
+        int content_len = 0;
+        char *content = read_file(single_file, &content_len);
+        if (!content) { errors = 1; goto cleanup; }
+
+        const char *prov = tag ? tag : single_file;
+        int64_t fid = vecfile_add(db, ns_id, emb,
+            content, content_len, prov, meta, 0, on_dup);
+        free(content);
+
+        if (fid < 0) { fprintf(stderr, "add failed\n"); errors = 1; }
+        else printf("added file_id=%lld\n", (long long)fid);
+
+    } else if (is_stdin) {
+        /* Stdin */
+        int content_len = 0;
+        char *content = read_stdin(&content_len);
+        if (!content || content_len == 0) {
+            fprintf(stderr, "no content on stdin\n");
+            free(content); errors = 1; goto cleanup;
+        }
+
+        int64_t fid = vecfile_add(db, ns_id, emb,
+            content, content_len, tag, meta, 0, on_dup);
+        free(content);
+
+        if (fid < 0) { fprintf(stderr, "add failed\n"); errors = 1; }
+        else printf("added file_id=%lld\n", (long long)fid);
+
+    } else if (n_bare == 1) {
+        /* Literal text (single bare arg that isn't a file) */
+        int content_len = (int)strlen(bare_args[0]);
+        int64_t fid = vecfile_add(db, ns_id, emb,
+            bare_args[0], content_len, tag, meta, 0, on_dup);
+
+        if (fid < 0) { fprintf(stderr, "add failed\n"); errors = 1; }
+        else printf("added file_id=%lld\n", (long long)fid);
+
+    } else {
+        fprintf(stderr, "no content provided\n");
+        errors = 1;
+    }
+
+cleanup:
     vecfile_embedder_free(emb);
     sqlite3_close(db);
-    free(content);
-
-    if (file_id < 0) {
-        fprintf(stderr, "add failed\n");
-        return 1;
-    }
-    printf("added file_id=%lld\n", (long long)file_id);
-    return 0;
+    free(bare_args);
+    return errors > 0 ? 1 : 0;
 }
 
 static int cmd_delete(int argc, char **argv) {
