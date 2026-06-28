@@ -53,13 +53,24 @@ static int has_flag(int argc, char **argv, const char *name) {
     return 0;
 }
 
+/* Boolean flags (no value). Everything else with -- takes a value. */
+static int is_bool_flag(const char *f) {
+    return strcmp(f, "--chunks") == 0
+        || strcmp(f, "--semantic-only") == 0
+        || strcmp(f, "--lexical-only") == 0
+        || strcmp(f, "--all") == 0
+        || strcmp(f, "--version") == 0
+        || strcmp(f, "-") == 0;
+}
+
 /* Get the last non-flag argument (positional).
    Skips values that belong to --flag VALUE pairs. */
 static const char *positional(int argc, char **argv) {
     for (int i = argc - 1; i >= 1; i--) {
         if (argv[i][0] == '-') continue;
-        /* Check if this arg is the value of a preceding --flag */
-        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-') continue;
+        /* Check if this arg is the value of a preceding value-flag */
+        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-'
+            && !is_bool_flag(argv[i-1])) continue;
         return argv[i];
     }
     return NULL;
@@ -197,13 +208,15 @@ static int collect_files(int argc, char **argv, const char ***out) {
     int count = 0;
     for (int i = 2; i < argc; i++) {  /* skip argv[0] and "add" */
         if (argv[i][0] == '-') {
-            /* Skip flag and its value (if it has one) */
-            if (argv[i][1] == '-' && i + 1 < argc && argv[i+1][0] != '-')
-                i++;  /* skip --flag VALUE */
+            /* Skip value-flag and its value */
+            if (argv[i][1] == '-' && !is_bool_flag(argv[i])
+                && i + 1 < argc && argv[i+1][0] != '-')
+                i++;
             continue;
         }
-        /* Check if this is a value for a preceding --flag */
-        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-') continue;
+        /* Check if this is a value for a preceding value-flag */
+        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-'
+            && !is_bool_flag(argv[i-1])) continue;
         count++;
     }
 
@@ -213,11 +226,13 @@ static int collect_files(int argc, char **argv, const char ***out) {
     int idx = 0;
     for (int i = 2; i < argc; i++) {
         if (argv[i][0] == '-') {
-            if (argv[i][1] == '-' && i + 1 < argc && argv[i+1][0] != '-')
+            if (argv[i][1] == '-' && !is_bool_flag(argv[i])
+                && i + 1 < argc && argv[i+1][0] != '-')
                 i++;
             continue;
         }
-        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-') continue;
+        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-'
+            && !is_bool_flag(argv[i-1])) continue;
         files[idx++] = argv[i];
     }
 
