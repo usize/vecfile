@@ -5,8 +5,9 @@
 extern "C" {
 #endif
 
-/* Path to the bundled model (Cosmopolitan zip filesystem) */
-#define VECFILE_BUNDLED_MODEL "/zip/models/default.gguf"
+/* Path to the bundled model */
+#include "platform.h"
+#define VECFILE_BUNDLED_MODEL VECFILE_BUNDLED_MODEL_PATH
 
 typedef struct vecfile_embedder vecfile_embedder;
 
