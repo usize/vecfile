@@ -29,7 +29,7 @@ static void usage(void) {
         "  vecfile query  --db PATH --ns NS [--limit N] [--pool N]\n"
         "                 [--semantic-only|--lexical-only] [--chunks]\n"
         "                 \"query text\"\n"
-        "  vecfile get    --db PATH --id N\n"
+        "  vecfile get    --db PATH (--id N | --tag T | --chunk N [-C N])\n"
         "\n"
         "  vecfile model\n"
         "  vecfile --version\n"
@@ -363,9 +363,19 @@ static int cmd_query(int argc, char **argv) {
 
 static int cmd_get(int argc, char **argv) {
     const char *db_path = flag(argc, argv, "--db");
+    if (!db_path) {
+        fprintf(stderr, "usage: vecfile get --db PATH (--id N | --tag T | --chunk N [-C N])\n");
+        return 1;
+    }
+
     const char *id_str = flag(argc, argv, "--id");
-    if (!db_path || !id_str) {
-        fprintf(stderr, "usage: vecfile get --db PATH --id N\n");
+    const char *tag = flag(argc, argv, "--tag");
+    const char *chunk_str = flag(argc, argv, "--chunk");
+    const char *ctx_str = flag(argc, argv, "-C");
+    int context = ctx_str ? atoi(ctx_str) : 0;
+
+    if (!id_str && !tag && !chunk_str) {
+        fprintf(stderr, "usage: vecfile get --db PATH (--id N | --tag T | --chunk N [-C N])\n");
         return 1;
     }
 
@@ -373,21 +383,79 @@ static int cmd_get(int argc, char **argv) {
     if (!db) return 1;
 
     sqlite3_stmt *stmt;
-    sqlite3_prepare_v2(db,
-        "SELECT content FROM files WHERE id = ?", -1, &stmt, NULL);
-    sqlite3_bind_int64(stmt, 1, atoll(id_str));
 
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char *content = (const char *)sqlite3_column_text(stmt, 0);
-        printf("%s", content);
-    } else {
-        fprintf(stderr, "file not found\n");
+    if (chunk_str) {
+        /* Get chunk by id, with optional surrounding context */
+        int64_t chunk_id = atoll(chunk_str);
+
+        /* First, find the chunk's file_id and ordinal */
+        sqlite3_prepare_v2(db,
+            "SELECT file_id, ordinal FROM chunks WHERE id = ?",
+            -1, &stmt, NULL);
+        sqlite3_bind_int64(stmt, 1, chunk_id);
+
+        if (sqlite3_step(stmt) != SQLITE_ROW) {
+            fprintf(stderr, "chunk not found\n");
+            sqlite3_finalize(stmt); sqlite3_close(db); return 1;
+        }
+        int64_t file_id = sqlite3_column_int64(stmt, 0);
+        int ordinal = sqlite3_column_int(stmt, 1);
         sqlite3_finalize(stmt);
-        sqlite3_close(db);
-        return 1;
+
+        /* Fetch the chunk and its neighbors */
+        int ord_min = ordinal - context;
+        if (ord_min < 0) ord_min = 0;
+        int ord_max = ordinal + context;
+
+        sqlite3_prepare_v2(db,
+            "SELECT id, ordinal, content FROM chunks"
+            " WHERE file_id = ? AND ordinal BETWEEN ? AND ?"
+            " ORDER BY ordinal",
+            -1, &stmt, NULL);
+        sqlite3_bind_int64(stmt, 1, file_id);
+        sqlite3_bind_int(stmt, 2, ord_min);
+        sqlite3_bind_int(stmt, 3, ord_max);
+
+        int first = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int64_t cid = sqlite3_column_int64(stmt, 0);
+            int ord = sqlite3_column_int(stmt, 1);
+            const char *text = (const char *)sqlite3_column_text(stmt, 2);
+            if (context > 0) {
+                /* With context, show chunk boundaries */
+                if (!first) printf("\n");
+                printf("--- chunk %lld (ordinal %d)%s ---\n",
+                       (long long)cid, ord,
+                       (cid == chunk_id) ? " [match]" : "");
+            }
+            printf("%s", text);
+            if (context > 0) printf("\n");
+            first = 0;
+        }
+        sqlite3_finalize(stmt);
+
+    } else {
+        /* Get file by id or tag */
+        if (id_str) {
+            sqlite3_prepare_v2(db,
+                "SELECT content FROM files WHERE id = ?", -1, &stmt, NULL);
+            sqlite3_bind_int64(stmt, 1, atoll(id_str));
+        } else {
+            sqlite3_prepare_v2(db,
+                "SELECT content FROM files WHERE path = ?", -1, &stmt, NULL);
+            sqlite3_bind_text(stmt, 1, tag, -1, SQLITE_TRANSIENT);
+        }
+
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *content = (const char *)sqlite3_column_text(stmt, 0);
+            printf("%s", content);
+        } else {
+            fprintf(stderr, "not found\n");
+            sqlite3_finalize(stmt); sqlite3_close(db); return 1;
+        }
+        sqlite3_finalize(stmt);
     }
 
-    sqlite3_finalize(stmt);
     sqlite3_close(db);
     return 0;
 }
