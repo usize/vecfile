@@ -23,7 +23,7 @@ static void usage(void) {
         "  vecfile ns info    --db PATH --name NS\n"
         "  vecfile ns delete  --db PATH --name NS\n"
         "\n"
-        "  vecfile add    --db PATH --ns NS [--path NAME] [--meta JSON]\n"
+        "  vecfile add    --db PATH --ns NS [--tag NAME] [--meta JSON]\n"
         "                 [--on-dup skip|replace] (\"text\" | - | --file F)\n"
         "  vecfile delete --db PATH --ns NS (--id N | --path P | --all)\n"
         "  vecfile query  --db PATH --ns NS [--limit N] [--pool N]\n"
@@ -52,10 +52,14 @@ static int has_flag(int argc, char **argv, const char *name) {
     return 0;
 }
 
-/* Get the last non-flag argument (positional) */
+/* Get the last non-flag argument (positional).
+   Skips values that belong to --flag VALUE pairs. */
 static const char *positional(int argc, char **argv) {
     for (int i = argc - 1; i >= 1; i--) {
-        if (argv[i][0] != '-') return argv[i];
+        if (argv[i][0] == '-') continue;
+        /* Check if this arg is the value of a preceding --flag */
+        if (i > 1 && argv[i-1][0] == '-' && argv[i-1][1] == '-') continue;
+        return argv[i];
     }
     return NULL;
 }
@@ -194,7 +198,7 @@ static int cmd_add(int argc, char **argv) {
     }
 
     const char *file_path = flag(argc, argv, "--file");
-    const char *path_name = flag(argc, argv, "--path");
+    const char *tag = flag(argc, argv, "--tag");
     const char *meta = flag(argc, argv, "--meta");
     const char *dup_str = flag(argc, argv, "--on-dup");
     int on_dup = (dup_str && strcmp(dup_str, "replace") == 0) ? 1 : 0;
@@ -202,7 +206,7 @@ static int cmd_add(int argc, char **argv) {
     /* Determine input source */
     char *content = NULL;
     int content_len = 0;
-    const char *provenance = path_name;
+    const char *provenance = tag;
 
     if (file_path) {
         content = read_file(file_path, &content_len);
