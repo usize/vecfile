@@ -105,6 +105,9 @@ MODEL_OBJS    = $(patsubst vendor/%.cpp,$(BUILDDIR)/%.cpp.o,$(MODEL_SRCS))
 
 ALL_OBJS = $(BUILDDIR)/main.o \
            $(BUILDDIR)/embed.cpp.o \
+           $(BUILDDIR)/schema.o \
+           $(BUILDDIR)/ingest.o \
+           $(BUILDDIR)/query.o \
            $(BUILDDIR)/sqlite3.o \
            $(BUILDDIR)/sqlite-vec.o \
            $(BUILDDIR)/model.zip.o \
@@ -123,6 +126,15 @@ $(BUILDDIR)/main.o: src/main.c | $(BUILDDIR)
 
 $(BUILDDIR)/embed.cpp.o: src/embed.cpp | $(BUILDDIR)
 	$(CXX) $(OUR_CXXFLAGS) $(GGML_FLAGS) -c -o $@ $<
+
+$(BUILDDIR)/schema.o: src/schema.c | $(BUILDDIR)
+	$(CC) $(OUR_CFLAGS) $(SQLITE_FLAGS) -c -o $@ $<
+
+$(BUILDDIR)/ingest.o: src/ingest.c | $(BUILDDIR)
+	$(CC) $(OUR_CFLAGS) $(SQLITE_FLAGS) -c -o $@ $<
+
+$(BUILDDIR)/query.o: src/query.c | $(BUILDDIR)
+	$(CC) $(OUR_CFLAGS) $(SQLITE_FLAGS) -c -o $@ $<
 
 # SQLite
 $(BUILDDIR)/sqlite3.o: vendor/sqlite/sqlite3.c | $(BUILDDIR)
