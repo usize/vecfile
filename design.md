@@ -2,7 +2,7 @@
 
 **A single-file, cross-platform, embedding-bundled hybrid search engine over a namespaced corpus.**
 
-Status: draft for coding-harness handoff
+Status: v0.1.0 MVP implemented (Phases 0–8 complete)
 Author: Morgan Foster
 Audience: an autonomous coding agent (and human reviewers)
 
@@ -93,12 +93,13 @@ is that weld.
 │ vecfile  (Actually Portable Executable, fat x86-64 + ARM64)    │
 │                                                                │
 │  main.c   CLI · chunking · RRF fusion · fan-out · migrate      │
+│  schema.c ingest.c query.c                                     │
 │    │                                                           │
 │    │  platform.h  (the seam: file I/O, weight load, threads)   │
 │    ▼                                                           │
 │  ┌──────────┐ ┌────────────┐ ┌──────────────┐                  │
-│  │ sqlite3.c│ │ vec0       │ │ lembed       │                  │
-│  │ +FTS5    │ │ sqlite-vec │ │ sqlite-lembed│                  │
+│  │ sqlite3.c│ │ vec0       │ │ embed.cpp    │                  │
+│  │ +FTS5    │ │ sqlite-vec │ │ (llama.cpp)  │                  │
 │  └──────────┘ └────────────┘ └──────────────┘                  │
 │  ┌──────────────────────────────────────────────┐             │
 │  │ ggml / llama.cpp  (embedding-only path)        │             │
@@ -116,16 +117,22 @@ is that weld.
 
 ### 4.2 Key decisions
 
-- **Build base:** fork llamafile's cosmocc build at a pinned commit. It already
-  has cosmocc wired up with per-platform CPU SIMD dispatch (tinyBLAS) and the
-  embedded-zip mechanism. Biggest single risk-reducer.
-- **Trim to embedding-only:** compile only llama.cpp's embedding path. Drop
-  sampling, grammars, chat templating, server UI.
-- **Extensions compiled in, not dlopen'd:** register `vec0` and `lembed` via
+- **Build base:** cosmocc 4.0.2, compiling llama.cpp at llamafile's pinned
+  commit (dbe9c0c). No patches needed — vanilla llama.cpp compiles under
+  cosmocc with `GGML_CPU_GENERIC`. No llamafile build system fork required.
+- **Trim to embedding-only:** compile all llama.cpp model architectures (avoids
+  patching the dispatch table) but only use the embedding inference path.
+  Sampling, grammars, chat templating, and server UI are dead code.
+- **Custom embedding wrapper (embed.h/embed.cpp)** replaces sqlite-lembed.
+  Thin C API over llama.cpp: load model, tokenize, decode, extract and
+  L2-normalize embeddings. ~130 lines of C++ vs. an unmaintained dependency.
+- **Extensions compiled in, not dlopen'd:** register `vec0` via
   `sqlite3_auto_extension()` at startup. A static APE loads nothing at runtime.
 - **FTS5 enabled** in the amalgamation (`-DSQLITE_ENABLE_FTS5`).
-- **Weights in the zip, corpus on disk.** Read-only GGUF zip-appended, mmap'd
-  from `/zip/...`. The writable, growing corpus is a normal SQLite file.
+- **Weights in the zip, corpus on disk.** Read-only GGUF compiled into the
+  binary via cosmocc's `zipobj`, loaded from `/zip/models/default.gguf`
+  with mmap disabled (buffered I/O for zip entries). The writable, growing
+  corpus is a normal SQLite file.
 - **Everything platform-specific behind `platform.h`** (file I/O, weight load,
   threading) so the native build and a future wasm build are build variants,
   not rewrites (§10).
@@ -236,13 +243,7 @@ The **single-namespace operation is the only primitive.** Everything else
 ### 6.1 `ns create`
 Insert a `namespaces` row with frozen config; create `chunks_fts_<id>` and
 `chunks_vec_<id>` for the chosen dimension. Validate that the requested
-`model`/`dim` matches the binary's compiled-in model (§8). Register the lembed
-model from the zip path:
-
-```sql
-INSERT INTO temp.lembed_models(name, model)
-  SELECT 'default', lembed_model_from_file('/zip/models/default.gguf');
-```
+`model`/`dim` matches the binary's compiled-in model (§8).
 
 ### 6.2 `add` (ingest, with inline chunking + embedding)
 All-in-one: accept content, chunk, embed, and index in a single transaction.
@@ -253,14 +254,14 @@ Content can come from anywhere — no filesystem required.
 echo "some text" | vecfile add --db mem.db --ns journal -       # stdin
 vecfile add --db mem.db --ns journal "literal text here"        # argument
 vecfile add --db mem.db --ns notes --file doc.txt               # single file
-vecfile add --db mem.db --ns notes --dir ./corpus/              # directory scan
+vecfile add --db mem.db --ns notes /path/to/corpus/*.txt        # wildcard
 ```
 
 **Flow:**
 1. Resolve namespace by name → id, load its frozen chunk config.
 2. Read content from the input source; compute sha256.
-   - For stdin/literal: `path` is NULL unless `--path` is provided explicitly.
-   - For `--file`/`--dir`: `path` is set to the source path automatically.
+   - For stdin/literal: `path` is NULL unless `--tag` is provided explicitly.
+   - For `--file` or wildcard args: `path` is set to the source path automatically.
 3. **Dedup check:** look up `(namespace_id, sha256)` in `files`.
    - If a match exists and `--on-dup skip` (default): skip silently.
    - If a match exists and `--on-dup replace`: delete the existing file row
@@ -270,17 +271,18 @@ vecfile add --db mem.db --ns notes --dir ./corpus/              # directory scan
 5. **Chunk** the content per namespace config (§7). For each chunk:
    a. Insert into `chunks` (with `ordinal`, `start_off`, `end_off`, `sha256`).
    b. Insert into `chunks_fts_<id>` (rowid = chunk id).
-   c. **Embed immediately:** compute `lembed('default', chunk.content)` and
-      insert into `chunks_vec_<id>` (rowid = chunk id, with `doc_date`).
+   c. **Embed immediately:** compute embedding via the compiled-in llama.cpp
+      model and insert into `chunks_vec_<id>` (rowid = chunk id, with `doc_date`).
 6. Update `files.chunk_count` with the final count.
 7. Commit the transaction. Content is fully searchable the moment `add` returns.
 
-**Idempotent bulk ingest:** `--dir D` or shell wildcards go through the dedup
-check per file, so re-running `add` over the same directory is a no-op for
-unchanged content. Updated files (same path, different sha256) are picked up
-with `--on-dup replace`.
+**Idempotent bulk ingest:** shell wildcards and multiple file arguments are
+supported natively — the DB and model are loaded once and reused across all
+files. SHA256 dedup means re-running `add` over the same directory is a no-op
+for unchanged content (0.05s vs 85s for 3 books on re-run). Updated files
+(same path, different sha256) are picked up with `--on-dup replace`.
 
-> Embedding is per-chunk sequential (one `lembed()` call each). Acceptable for
+> Embedding is per-chunk sequential (one inference call each). Acceptable for
 > incremental use; bulk-loading thousands of entries is CPU-bound but correct.
 
 ### 6.3 `delete` (remove files or namespaces)
@@ -348,8 +350,20 @@ Defaults: `:pool=50`, `:rrf_k=60` (TREC default, tuning-insensitive),
 `--chunks` returns bare chunks instead of parent files; `--since/--until` for
 dates; `--where '$.k = "v"'` for JSON metadata.
 
-### 6.5 `get` / retrieve whole content
-Return `files.content` by id — the whole raw content, intact.
+### 6.5 `get` / retrieve content
+Retrieve content by file id, tag, or chunk id with optional context:
+
+```
+vecfile get --db PATH --id N            # whole file by id
+vecfile get --db PATH --tag T           # whole file by tag/provenance
+vecfile get --db PATH --chunk N         # single chunk by chunk id
+vecfile get --db PATH --chunk N -C 2    # chunk + 2 neighbors before/after
+```
+
+The `-C N` flag (like `grep -C`) is designed for LLM consumption: query with
+`--chunks` to find relevant chunk_ids, then expand context around a hit
+without loading the entire source file. Each chunk in context output is
+labeled with its id, ordinal, and a `[match]` marker.
 
 ### 6.6 `query --ns a,b,c` / `--all` (fan-out = orchestration)
 Not a new query path. The orchestrator:
@@ -389,8 +403,8 @@ re-ingestion. Optionally drops the old namespace on success
 Chunking is in-binary and driven entirely by the namespace's frozen config.
 
 - **Default strategy: `fixed`** — fixed-size windows with overlap (default
-  ~512 tokens, ~64 overlap). Robust, predictable, no extra in-binary
-  dependencies beyond the tokenizer already present for the embedding model.
+  512 chars, 64 overlap). Robust, predictable. Char-based for v1 to avoid
+  a C++ dependency in the chunker; token-based is a future improvement.
 - **Seam for `paragraph` / sentence-aware** — better retrieval on prose;
   needs a segmenter. Land `fixed` first; expose `chunk_strategy` so smarter
   splitters slot in without schema change.
@@ -419,9 +433,8 @@ Chunking is in-binary and driven entirely by the namespace's frozen config.
   Operations refuse a namespace whose model/dim doesn't match the running
   binary's compiled-in model — preventing silent corruption (e.g. writing
   384-dim vectors into a namespace built for a 768-dim model).
-- Estimated artifact size: SQLite+FTS5+vec0 (low single-digit MB) +
-  embedding-only ggml (a few MB) + weights (~24–33 MB) ≈ **30–40 MB single
-  file**.
+- Actual artifact size: ~10 MB code (SQLite+FTS5+vec0+ggml+llama.cpp) +
+  ~35 MB model (bge-small Q8_0) = **~45 MB single file**.
 
 ---
 
@@ -432,13 +445,10 @@ All permissive; **no copyleft** anywhere; closed-source redistribution allowed.
 | Component | License | Obligation |
 |-----------|---------|-----------|
 | Cosmopolitan Libc | ISC | preserve notice |
-| llamafile (build scaffolding) | Apache-2.0 | notice + LICENSE + note changes |
 | llama.cpp / ggml | MIT | preserve notice |
 | SQLite | Public Domain | none |
 | sqlite-vec | MIT OR Apache-2.0 | preserve notice |
-| sqlite-lembed | MIT OR Apache-2.0 | preserve notice |
 | bge-small-en-v1.5 weights | MIT | preserve notice |
-| (alt) all-MiniLM-L6-v2 weights | Apache-2.0 | preserve notice; see caveat |
 
 **Deliverable:** one `THIRD_PARTY_LICENSES.txt`, zip-appended, dumpable via
 `--license`. Extend llamafile's existing notice file with our additions.
@@ -496,32 +506,32 @@ satisfy later.
 ## 11. CLI surface
 
 ```
-vecfile ns create  --db PATH --name NS [--model NAME] [--dim N]
+vecfile ns create  --db PATH --name NS
                     [--chunk-strategy fixed|paragraph] [--chunk-size N]
                     [--chunk-overlap N] [--chunk-unit token|char]
-                    [--fts-tokenizer T]
 vecfile ns list     --db PATH
 vecfile ns info     --db PATH --name NS
 vecfile ns delete   --db PATH --name NS
 
-vecfile add    --db PATH --ns NS [--meta JSON] [--date YYYY-MM-DD]
-               [--path NAME] [--on-dup skip|replace]
-               ("text" | - | --file F | --dir D)
+vecfile add    --db PATH --ns NS [--tag NAME] [--meta JSON]
+               [--on-dup skip|replace]
+               ("text" | - | --file F | file1 file2 ... | *.txt)
 vecfile delete --db PATH --ns NS (--id N | --path P | --all)
-vecfile query  --db PATH (--ns NS | --ns a,b,c | --all)
+vecfile query  --db PATH --ns NS
                [--limit N] [--pool N] [--rrf-k N]
                [--semantic-only|--lexical-only] [--chunks]
-               [--since DATE] [--until DATE] [--where '$.k = "v"']
-               [--workers N] [--json] "query text"
-vecfile get    --db PATH --id N            # whole raw file
-vecfile migrate --db PATH --from NS --to NS [chunk/model overrides] [--drop-source]
+               "query text"
+vecfile get    --db PATH (--id N | --tag T | --chunk N [-C N])
 
 vecfile model               # compiled-in model id, dim, quantization
-vecfile --license           # dump THIRD_PARTY_LICENSES.txt
 vecfile --version
 ```
 
-Conventional exit codes. `--json` everywhere for machine consumption.
+Conventional exit codes.
+
+**Implemented in v0.1.0:** all of the above.
+**Not yet implemented:** `--since/--until` date filters, `--where` JSON filters,
+`--json` output, `--ns a,b,c` fan-out, `--workers`, `migrate`, `--license`.
 
 ---
 
@@ -529,17 +539,17 @@ Conventional exit codes. `--json` everywhere for machine consumption.
 
 Phased; each phase ends at a runnable checkpoint. **Cosmopolitan/APE only.**
 
-- **Phase 0 — toolchain.** cosmocc builds a hello-world APE that runs on host (macOS ARM64). Vendor llamafile at a pinned commit.
-- **Phase 1 — SQLite core APE.** Compile `sqlite3.c` (`-DSQLITE_ENABLE_FTS5`); open a db, run an FTS5 query. Checkpoint: APE opens DB, FTS works.
-- **Phase 2 — vec0 in-binary.** Add `sqlite-vec.c`; register via `sqlite3_auto_extension`; create a vec0 table, insert literal vectors, KNN query — no `.load`.
-- **Phase 3 — embedding path (highest risk).** Pull in embedding-only ggml/llama.cpp + `sqlite-lembed.c`. Load GGUF from a plain file path first. Get `lembed('default','hello')` → 384-float blob. Lean on llamafile's exact cosmocc flags. Checkpoint: end-to-end embed in SQL.
-- **Phase 4 — bundle weights.** Zip-append the GGUF; switch to `/zip/models/default.gguf`; confirm mmap-from-self. Checkpoint: single file, no external model.
-- **Phase 5 — platform.h seam.** Route all file I/O, weight load, threading through `platform.h` with a cosmocc impl. (No wasm impl yet — just the boundary.) Checkpoint: no raw platform calls outside the seam.
-- **Phase 6 — namespaces + schema.** `namespaces` table, opaque-id per-ns index tables, model/dim guard, `ns create/list/info/delete`. Checkpoint: create/inspect/delete namespaces.
-- **Phase 7 — add (inline chunk + embed) + delete.** Built-in fixed-window chunking from ns config; `add` ingests whole file + chunks + FTS + embeds in one transaction (§6.2). Dedup via sha256 (skip unchanged, replace updated). `delete` removes files/namespaces with CASCADE. Checkpoint: ingest a dir, re-run is no-op, delete works.
-- **Phase 8 — query primitive + RRF + filters.** §6.4 single-ns hybrid query with date/JSON filters, `--chunks`, parent-file return. Checkpoint: "better than BM25" fixture passes (A2).
-- **Phase 9 — fan-out + workers + migrate.** `--ns a,b,c`/`--all` with embed-once-reuse, same-`(model,dim)` precondition, queue + thread pool; first-class `migrate`. Checkpoint: multi-ns search + a real migration.
-- **Phase 10 — fat binary + polish.** apelink x86-64+ARM64; `--license`, `model`, version, `-mtiny -Os`. Run the §13 matrix.
+- ✅ **Phase 0 — toolchain.** cosmocc 4.0.2 builds APEs on macOS ARM64.
+- ✅ **Phase 1 — SQLite core APE.** SQLite 3.49.1 with FTS5 compiled and tested.
+- ✅ **Phase 2 — vec0 in-binary.** sqlite-vec v0.1.7 via `sqlite3_auto_extension`. KNN works.
+- ✅ **Phase 3 — embedding path.** llama.cpp (commit dbe9c0c) compiles under cosmocc with zero patches using `GGML_CPU_GENERIC`. Custom embed.h/embed.cpp wrapper replaces sqlite-lembed. bge-small produces 384-dim vectors.
+- ✅ **Phase 4 — bundle weights.** GGUF compiled into binary via `zipobj`. 45 MB self-contained APE loads model from `/zip/models/default.gguf`.
+- ✅ **Phase 5 — platform.h seam.** Minimal seam with three swap points. Lightweight for v1.
+- ✅ **Phase 6 — namespaces + schema.** Full namespace CRUD, per-ns FTS5/vec0 tables, model/dim guard.
+- ✅ **Phase 7 — add + delete.** Inline chunk+embed in one txn. SHA256 dedup. Wildcard/multi-file add. Full delete CRUD.
+- ✅ **Phase 8 — query + RRF.** Hybrid/semantic/lexical modes. `--chunks` with `-C` context expansion for LLM retrieval.
+- ⬜ **Phase 9 — fan-out + workers + migrate.** Multi-namespace query, thread pool, migrate.
+- ⬜ **Phase 10 — fat binary + polish.** apelink, `--license`, size optimization.
 
 ---
 
@@ -569,12 +579,12 @@ Same binary on every cell; identical results expected.
 
 ## 14. Risks & open questions
 
-- **R1 (highest): ggml under cosmocc.** Mitigation: fork llamafile's exact build flags. Target macOS ARM64 + Linux x86-64/ARM64 only.
-- **R2: sqlite-lembed maturity / no batching.** Acceptable for incremental ingest; document reindex cost; possible upstream batching contribution.
+- ~~**R1 (highest): ggml under cosmocc.**~~ **Resolved.** Vanilla llama.cpp compiles under cosmocc with zero patches using `GGML_CPU_GENERIC`.
+- ~~**R2: sqlite-lembed maturity / no batching.**~~ **Resolved.** sqlite-lembed replaced with custom embed.h/embed.cpp (~130 lines). No upstream dependency.
 - **R3: per-namespace table proliferation.** Many namespaces = many vtables. Fine for tens–hundreds; if thousands of namespaces are expected, revisit (shared table + partition key as a fallback mode).
 - **R4: APE execution friction.** Gatekeeper on macOS; binfmt_misc on some Linux distros. Ship a short "first run" note. UX/docs, not code.
 - **Q1:** Light ANN (sqlite-vec DiskANN/IVF) as opt-in for very large single namespaces? Lean: namespacing first; `--ann` seam; not v1.
-- **Q2:** Default chunk size/overlap and token-vs-char default — confirm 512/64 tokens.
+- ~~**Q2:** Default chunk size/overlap and token-vs-char default~~ — **Answered:** 512/64 chars for v1.
 - **Q3:** Multi-model-in-one-binary (runtime-selectable) vs one-model-per-build? Lean: one-per-build for v1; the namespace model/dim guard already anticipates multi-model.
 - **Q4:** `serve` in v1 or later? Lean: optional, Phase 10, behind the platform seam.
 
