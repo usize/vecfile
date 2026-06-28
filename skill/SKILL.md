@@ -43,7 +43,11 @@ When `$action` is "recall" or when you need context before answering,
 search for relevant memories. Use `$ARGUMENTS` as the query.
 
 ```bash
-# Hybrid search (default — best for most queries)
+# Search across ALL namespaces (default — searches everything)
+~/.claude/bin/vecfile query --db ~/.claude/vecfile.memory.db --all \
+  --chunks --limit 5 "query text"
+
+# Search a specific namespace
 ~/.claude/bin/vecfile query --db ~/.claude/vecfile.memory.db --ns default \
   --chunks --limit 5 "query text"
 
@@ -53,6 +57,7 @@ search for relevant memories. Use `$ARGUMENTS` as the query.
 ```
 
 Always use `--chunks` so you get chunk IDs for context expansion.
+Use `--all` by default to search across every namespace.
 
 ### context — load a specific memory
 
@@ -82,5 +87,7 @@ When `$action` is "forget", remove content by ID or tag.
 - **Recall before complex tasks.** Before starting work that might benefit from
   prior context, check memory first.
 - **Keep memories atomic.** One concept per memory. A short paragraph is ideal.
-- **Tag meaningfully.** Tags like "user-prefers-tabs" or "project-uses-pytest"
+- **Tag meaningfully.** Tags like "user-prefers-spaces" or "project-uses-pytest"
   are retrievable by name later.
+- **Use --all for recall.** Always search across all namespaces unless the user
+  asks for a specific one. Memories and knowledge live in different namespaces.

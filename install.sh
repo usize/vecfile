@@ -2,7 +2,7 @@
 set -e
 
 REPO="usize/vecfile"
-VERSION="v0.1.0"
+VERSION="v0.1.1"
 BIN_DIR="$HOME/.claude/bin"
 DB_PATH="$HOME/.claude/vecfile.memory.db"
 SKILL_DIR="$HOME/.claude/skills/memory"
@@ -20,7 +20,7 @@ chmod +x "$BIN_DIR/vecfile"
 
 # 2. Verify hash
 echo "-> Verifying SHA256..."
-EXPECTED="e3705a59db21679f6d75a4da6ada01297e2307988fce3c7a452a07e8327a98dd"
+EXPECTED="1e6b356267f7e198e6955f7c9eb98ade3ae27f0b6ee2490d5e50e06871cdaa5f"
 ACTUAL=$(shasum -a 256 "$BIN_DIR/vecfile" | cut -d' ' -f1)
 if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "   HASH MISMATCH"
