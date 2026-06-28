@@ -27,4 +27,10 @@ void vecfile_query_opts_default(vecfile_query_opts *opts);
 int vecfile_query(sqlite3 *db, int64_t ns_id, vecfile_embedder *emb,
                   const char *query_text, const vecfile_query_opts *opts);
 
+/* Run a query across all namespaces.
+   Results are RRF-merged and printed sorted by score.
+   Returns number of results, or negative on error. */
+int vecfile_query_all(sqlite3 *db, vecfile_embedder *emb,
+                      const char *query_text, const vecfile_query_opts *opts);
+
 #endif /* VECFILE_QUERY_H */

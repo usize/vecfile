@@ -27,7 +27,7 @@ static void usage(void) {
         "                 [--on-dup skip|replace]\n"
         "                 (\"text\" | - | --file F | file1 file2 ... | *.txt)\n"
         "  vecfile delete --db PATH --ns NS (--id N | --path P | --all)\n"
-        "  vecfile query  --db PATH --ns NS [--limit N] [--pool N]\n"
+        "  vecfile query  --db PATH (--ns NS | --all) [--limit N] [--pool N]\n"
         "                 [--semantic-only|--lexical-only] [--chunks]\n"
         "                 \"query text\"\n"
         "  vecfile get    --db PATH (--id N | --tag T | --chunk N [-C N])\n"
@@ -418,8 +418,10 @@ static int cmd_delete(int argc, char **argv) {
 static int cmd_query(int argc, char **argv) {
     const char *db_path = flag(argc, argv, "--db");
     const char *ns_name = flag(argc, argv, "--ns");
-    if (!db_path || !ns_name) {
-        fprintf(stderr, "usage: vecfile query --db PATH --ns NS \"query text\"\n");
+    int query_all = has_flag(argc, argv, "--all");
+
+    if (!db_path || (!ns_name && !query_all)) {
+        fprintf(stderr, "usage: vecfile query --db PATH (--ns NS | --all) \"query text\"\n");
         return 1;
     }
 
@@ -432,12 +434,6 @@ static int cmd_query(int argc, char **argv) {
     sqlite3_auto_extension((void (*)(void))sqlite3_vec_init);
     sqlite3 *db = open_db(db_path);
     if (!db) return 1;
-
-    int64_t ns_id = vecfile_ns_lookup(db, ns_name);
-    if (ns_id < 0) {
-        fprintf(stderr, "namespace '%s' not found\n", ns_name);
-        sqlite3_close(db); return 1;
-    }
 
     vecfile_query_opts opts;
     vecfile_query_opts_default(&opts);
@@ -459,7 +455,18 @@ static int cmd_query(int argc, char **argv) {
         }
     }
 
-    int n = vecfile_query(db, ns_id, emb, query_text, &opts);
+    int n;
+    if (query_all) {
+        n = vecfile_query_all(db, emb, query_text, &opts);
+    } else {
+        int64_t ns_id = vecfile_ns_lookup(db, ns_name);
+        if (ns_id < 0) {
+            fprintf(stderr, "namespace '%s' not found\n", ns_name);
+            if (emb) vecfile_embedder_free(emb);
+            sqlite3_close(db); return 1;
+        }
+        n = vecfile_query(db, ns_id, emb, query_text, &opts);
+    }
 
     if (emb) vecfile_embedder_free(emb);
     sqlite3_close(db);
