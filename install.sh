@@ -20,7 +20,7 @@ chmod +x "$BIN_DIR/vecfile"
 
 # 2. Verify hash
 echo "-> Verifying SHA256..."
-EXPECTED="84b5a628243b8bea8bd0e8408d304fa390154c594ce6a1b3a1b73d1acc2926d7"
+EXPECTED="e3705a59db21679f6d75a4da6ada01297e2307988fce3c7a452a07e8327a98dd"
 ACTUAL=$(shasum -a 256 "$BIN_DIR/vecfile" | cut -d' ' -f1)
 if [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "   HASH MISMATCH"
