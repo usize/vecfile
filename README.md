@@ -12,20 +12,19 @@ MM                                                     MM
 MMmmm                                               mmmMM
 ```
 
-**What**
+### What
 
 A single binary with an internal embedding model, inference engine and sqlite support.
 This is an APE binary--see [cosmopolitan](https://github.com/jart/cosmopolitan)--so it's
 highly portable.
 
-**Why**
+### Why
 
 I'm tired of elaborate memory systems. A single binary and a db file should be enough.
 
 I can pack it around with a skill for use by any LLM.
 
-**Usage**
-
+### Usage
 ```
 vecfile <command> [options]
 ```
