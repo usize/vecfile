@@ -26,6 +26,7 @@ static void usage(void) {
         "  vecfile add    --db PATH --ns NS [--tag NAME] [--meta JSON]\n"
         "                 [--on-dup skip|replace]\n"
         "                 (\"text\" | - | --file F | file1 file2 ... | *.txt)\n"
+        "  vecfile ls     --db PATH [--ns NS] [--tags]\n"
         "  vecfile delete --db PATH --ns NS (--id N | --path P | --all)\n"
         "  vecfile query  --db PATH (--ns NS | --all) [--limit N] [--pool N]\n"
         "                 [--semantic-only|--lexical-only] [--chunks]\n"
@@ -59,6 +60,7 @@ static int is_bool_flag(const char *f) {
         || strcmp(f, "--semantic-only") == 0
         || strcmp(f, "--lexical-only") == 0
         || strcmp(f, "--all") == 0
+        || strcmp(f, "--tags") == 0
         || strcmp(f, "--version") == 0
         || strcmp(f, "-") == 0;
 }
@@ -476,6 +478,104 @@ static int cmd_query(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_ls(int argc, char **argv) {
+    const char *db_path = flag(argc, argv, "--db");
+    if (!db_path) {
+        fprintf(stderr, "usage: vecfile ls --db PATH [--ns NS]\n");
+        return 1;
+    }
+
+    const char *ns_name = flag(argc, argv, "--ns");
+    int tags_only = has_flag(argc, argv, "--tags");
+
+    sqlite3 *db = open_db(db_path);
+    if (!db) return 1;
+
+    sqlite3_stmt *stmt;
+    int rc;
+
+    if (ns_name) {
+        /* List files in a specific namespace */
+        int64_t ns_id = vecfile_ns_lookup(db, ns_name);
+        if (ns_id < 0) {
+            fprintf(stderr, "namespace '%s' not found\n", ns_name);
+            sqlite3_close(db); return 1;
+        }
+
+        if (tags_only) {
+            rc = sqlite3_prepare_v2(db,
+                "SELECT path FROM files WHERE namespace_id = ?"
+                " AND path IS NOT NULL ORDER BY path",
+                -1, &stmt, NULL);
+            sqlite3_bind_int64(stmt, 1, ns_id);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                printf("%s\n", sqlite3_column_text(stmt, 0));
+            }
+        } else {
+            rc = sqlite3_prepare_v2(db,
+                "SELECT id, path, bytes, chunk_count, added_at FROM files"
+                " WHERE namespace_id = ? ORDER BY id",
+                -1, &stmt, NULL);
+            sqlite3_bind_int64(stmt, 1, ns_id);
+            int count = 0;
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *path = (const char *)sqlite3_column_text(stmt, 1);
+                int bytes = sqlite3_column_int(stmt, 2);
+                int chunks = sqlite3_column_int(stmt, 3);
+                printf("  %-6lld  %-40s  %6d bytes  %3d chunks\n",
+                    (long long)sqlite3_column_int64(stmt, 0),
+                    path ? path : "(stdin)",
+                    bytes, chunks);
+                count++;
+            }
+            if (count == 0) printf("(empty)\n");
+        }
+        sqlite3_finalize(stmt);
+
+    } else {
+        /* List files across all namespaces */
+        if (tags_only) {
+            rc = sqlite3_prepare_v2(db,
+                "SELECT n.name, f.path FROM files f"
+                " JOIN namespaces n ON n.id = f.namespace_id"
+                " WHERE f.path IS NOT NULL"
+                " ORDER BY n.name, f.path",
+                -1, &stmt, NULL);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                printf("%s\t%s\n",
+                    sqlite3_column_text(stmt, 0),
+                    sqlite3_column_text(stmt, 1));
+            }
+        } else {
+            rc = sqlite3_prepare_v2(db,
+                "SELECT f.id, n.name, f.path, f.bytes, f.chunk_count"
+                " FROM files f"
+                " JOIN namespaces n ON n.id = f.namespace_id"
+                " ORDER BY n.name, f.id",
+                -1, &stmt, NULL);
+            int count = 0;
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *ns = (const char *)sqlite3_column_text(stmt, 1);
+                const char *path = (const char *)sqlite3_column_text(stmt, 2);
+                int bytes = sqlite3_column_int(stmt, 3);
+                int chunks = sqlite3_column_int(stmt, 4);
+                printf("  %-6lld  %-12s  %-40s  %6d bytes  %3d chunks\n",
+                    (long long)sqlite3_column_int64(stmt, 0),
+                    ns,
+                    path ? path : "(stdin)",
+                    bytes, chunks);
+                count++;
+            }
+            if (count == 0) printf("(empty)\n");
+        }
+        sqlite3_finalize(stmt);
+        (void)rc;
+    }
+
+    sqlite3_close(db);
+    return 0;
+}
+
 static int cmd_get(int argc, char **argv) {
     const char *db_path = flag(argc, argv, "--db");
     if (!db_path) {
@@ -612,6 +712,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(cmd, "add") == 0)    return cmd_add(argc, argv);
+    if (strcmp(cmd, "ls") == 0)     return cmd_ls(argc, argv);
     if (strcmp(cmd, "delete") == 0) return cmd_delete(argc, argv);
     if (strcmp(cmd, "query") == 0)  return cmd_query(argc, argv);
     if (strcmp(cmd, "get") == 0)    return cmd_get(argc, argv);
